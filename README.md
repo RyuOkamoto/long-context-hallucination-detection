@@ -1,17 +1,17 @@
-## My Project
+# Towards Long Context Hallucination Detection
 
-TODO: Fill this README out!
+This repository contains the sources used in the following paper. Please consider citing if you use these sources.
 
-Be sure to:
+```
+@inproceedings{
+liu2025towards,
+title={Towards Long Context Hallucination Detection},
+author={Siyi Liu and Kishaloy Halder and Zheng Qi and Wei Xiao and Nikolaos Pappas and Phu Mon Htut and Neha Anna John and Yassine Benajiba and Dan Roth},
+booktitle={The 2025 Annual Conference of the Nations of the Americas Chapter of the ACL},
+year={2025}
+}
+```
 
-* Change the title in this README
-* Edit your repository description on GitHub
+data/ contains a `sample.json` file with a dummy data point to train/test hallucination detection models.
 
-## Security
-
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
-
-## License
-
-This project is licensed under the Apache-2.0 License.
-
+src/ contains the code for training and evaluation. To train, simply run `bash train.sh`. To evaluate, run `eval.py` with appropriate arguments (see `train.sh`).
