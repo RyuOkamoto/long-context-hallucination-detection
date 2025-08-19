@@ -49,7 +49,7 @@ The dataset is constructed from BookSum, introducing contextual hallucinations u
 - **Training set**: 5,653 examples (51% hallucinations)
 - **Test set**: 1,142 examples (50% hallucinations)
 
-We modified the original data by collecting their chapter-leve texts, and then prompting GPT-4o to introduce hallucinations to it
+We modified the original data by collecting their chapter-level texts, and then prompting GPT-4o to introduce hallucinations to it
 by adding/modifying a sentence there (the exact prompt can be found in Appendic C in our paper).
 
 ### Data Format
