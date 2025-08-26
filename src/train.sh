@@ -1,14 +1,15 @@
 accelerate launch train.py \
   --model_name_or_path FacebookAI/roberta-large \
-  --training_data_path /home/ec2-user/book_sum/gpt4o_mini_booksum_hallu_train_all.pickle \
-  --testing_data_path /home/ec2-user/book_sum/gpt4o_booksum_hallu_test_all.pickle \
+  --training_data_path data/train_all.json \
+  --testing_data_path data/test_all.json \
   --max_length 4096 \
   --per_device_train_batch_size 1 \
   --per_device_eval_batch_size 1 \
   --learning_rate 2e-6 \
   --num_train_epochs 200 \
-  --output_dir trained_models/roberta_split_booksum_256_32_8_8192_64_2e6_pad_last_split_sent_encoder_train_1000_test_all_thres0.2 \
+  --output_dir outputs/ \
   --seed 42 \
+  --train_top_k 1000 \
   --split \
   --chunk_size 256 \
   --stride 256 \

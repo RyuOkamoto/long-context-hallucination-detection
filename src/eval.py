@@ -12,6 +12,27 @@
   # See the License for the specific language governing permissions and
   # limitations under the License.
 
+"""
+Evaluation Script for Long Context Hallucination Detection
+
+This script provides evaluation capabilities for the long context hallucination detection model.
+It loads a trained model and evaluates it on test data, computing various metrics including
+F1, Precision, Recall, and ROC-AUC.
+
+Key Features:
+- Support for chunked input processing
+- Comprehensive evaluation metrics
+- Detailed predictions output
+- GPU support with proper device handling
+
+Usage:
+    python eval.py --model_name_or_path path/to/model \
+                   --testing_data_path data/test_all.json \
+                   --split --attention_encoder --pad_last --split_inputs
+
+Author: Siyi Liu et al.
+"""
+
 import argparse
 import json
 import logging
@@ -285,6 +306,12 @@ def parse_args():
         "--ignore_mismatched_sizes",
         action="store_true",
         help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
+    )
+    parser.add_argument(
+        "--train_top_k",
+        type=int,
+        default=1000,
+        help="Number of training examples to use from the beginning of the training dataset.",
     )
     args = parser.parse_args()
 

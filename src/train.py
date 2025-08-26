@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Finetuning a 🤗 Transformers model for sequence classification on GLUE."""
+
 
 import argparse
 import json
@@ -21,6 +21,8 @@ import math
 import os
 import random
 from pathlib import Path
+from datetime import timedelta
+import csv
 
 import datasets
 import evaluate
@@ -28,13 +30,10 @@ import torch
 from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from datasets import Dataset
-from datetime import timedelta
-import csv
 
 import transformers
 from transformers import (
@@ -64,251 +63,313 @@ require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Finetune a transformers model on a text classification task")
+    """
+    Parse command line arguments for training configuration.
+    
+    Returns:
+        argparse.Namespace: Parsed arguments containing all training parameters
+    """
+    parser = argparse.ArgumentParser(
+        description="Train a long context hallucination detection model using RoBERTa"
+    )
 
+    # Model architecture arguments
     parser.add_argument(
         "--explainability",
         action="store_true",
-        help="If passed, look at the localization results",
+        help="Enable explainability features for attention visualization"
     )
-
     parser.add_argument(
         "--split_sent",
         action="store_true",
-        help="If passed, split response into sentences instead of fixed length chunks",
+        help="Split response into sentences instead of fixed length chunks"
     )
-
     parser.add_argument(
         "--add_sep",
         action="store_true",
-        help="If passed, add SEP token between context and response chunks.",
+        help="Add SEP token between context and response chunks"
     )
-
     parser.add_argument(
         "--sent_length",
         type=int,
         default=20,
+        help="Maximum length for sentence-based chunks"
     )
-
-
     parser.add_argument(
         "--pad_original",
         action="store_true",
-        help="If passed, use original style of padding",
+        help="Use original style of padding (legacy option)"
     )
-
     parser.add_argument(
         "--pair_chunks",
         action="store_true",
-        help="If passed, using a NLI style of pairing chunks.",
+        help="Use NLI-style pairing of context and response chunks"
     )
-
-
     parser.add_argument(
         "--pad_last",
         action="store_true",
-        help="If passed, pad everything at the end, instead of padding each chunk.",
+        help="Pad everything at the end instead of padding each chunk individually"
     )
-
     parser.add_argument(
         "--split_inputs",
         action="store_true",
-        help="If passed, split input into context chunks and response chunks",
+        help="Split input into separate context chunks and response chunks"
     )
 
+    # Chunking parameters
     parser.add_argument(
         "--num_chunks1",
         type=int,
-        default=6,
+        default=32,
+        help="Number of context chunks"
     )
-
     parser.add_argument(
         "--num_chunks2",
         type=int,
-        default=2,
+        default=8,
+        help="Number of response chunks"
     )
-
     parser.add_argument(
         "--chunk_size",
         type=int,
-        default=510,
+        default=256,
+        help="Size of each chunk in tokens"
     )
-
     parser.add_argument(
         "--stride",
         type=int,
-        default=510,
+        default=256,
+        help="Stride for overlapping chunks"
     )
     parser.add_argument(
         "--minimal_chunk_length",
         type=int,
         default=0,
+        help="Minimum length for a chunk to be included"
     )
-
     parser.add_argument(
         "--maximal_text_length",
         type=int,
-        default=None,
+        default=8192,
+        help="Maximum total text length before truncation"
     )
 
+    # Model configuration
     parser.add_argument(
         "--split",
         action="store_true",
-        help="If passed, split input into chunks",
+        help="Enable chunk splitting for long contexts"
     )
-
     parser.add_argument(
         "--attention_encoder",
         action="store_true",
-        help="If passed, use the attention layer. Else use mean pooler",
+        help="Use attention-based aggregation instead of mean pooling"
     )
 
+    # Input/Output arguments
     parser.add_argument(
         "--max_length",
         type=int,
         default=128,
-        help=(
-            "The maximum total input sequence length after tokenization. Sequences longer than this will be truncated,"
-            " sequences shorter will be padded if `--pad_to_max_length` is passed."
-        ),
+        help="Maximum input sequence length after tokenization"
     )
     parser.add_argument(
         "--pad_to_max_length",
         action="store_true",
-        help="If passed, pad all samples to `max_length`. Otherwise, dynamic padding is used.",
+        help="Pad all samples to max_length instead of using dynamic padding"
     )
     parser.add_argument(
         "--model_name_or_path",
         type=str,
-        help="Path to pretrained model or model identifier from huggingface.co/models.",
         required=True,
+        help="Path to pretrained model or model identifier from huggingface.co/models"
     )
     parser.add_argument(
         "--training_data_path",
         type=str,
-        help="training data",
         required=True,
+        help="Path to training data file (JSON format)"
     )
     parser.add_argument(
         "--testing_data_path",
         type=str,
-        help="testing data",
         required=True,
+        help="Path to testing/validation data file (JSON format)"
     )
-
     parser.add_argument(
         "--backbone_model",
         type=str,
-        help="Path to pretrained model or model identifier from huggingface.co/models.",
+        help="Path to backbone model if different from model_name_or_path"
     )
+
+    # Training arguments
     parser.add_argument(
         "--use_slow_tokenizer",
         action="store_true",
-        help="If passed, will use a slow tokenizer (not backed by the 🤗 Tokenizers library).",
+        help="Use a slow tokenizer (not backed by the 🤗 Tokenizers library)"
     )
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=8,
-        help="Batch size (per device) for the training dataloader.",
+        default=1,
+        help="Batch size per device for training"
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=8,
-        help="Batch size (per device) for the evaluation dataloader.",
+        default=1,
+        help="Batch size per device for evaluation"
     )
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=5e-5,
-        help="Initial learning rate (after the potential warmup period) to use.",
+        default=2e-6,
+        help="Initial learning rate"
     )
-    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
-    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.1,
+        help="Weight decay to use"
+    )
+    parser.add_argument(
+        "--num_train_epochs",
+        type=int,
+        default=200,
+        help="Total number of training epochs"
+    )
     parser.add_argument(
         "--max_train_steps",
         type=int,
         default=None,
-        help="Total number of training steps to perform. If provided, overrides num_train_epochs.",
+        help="Total number of training steps (overrides num_train_epochs if provided)"
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
         default=1,
-        help="Number of updates steps to accumulate before performing a backward/update pass.",
+        help="Number of update steps to accumulate before performing backward/update pass"
     )
     parser.add_argument(
         "--lr_scheduler_type",
         type=SchedulerType,
         default="linear",
-        help="The scheduler type to use.",
-        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+        help="The scheduler type to use",
+        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]
     )
     parser.add_argument(
-        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+        "--num_warmup_steps",
+        type=int,
+        default=1000,
+        help="Number of steps for warmup in the lr scheduler"
     )
-    parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
+
+    # Output and logging arguments
     parser.add_argument(
-        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
+        "--output_dir",
+        type=str,
+        default="./outputs",
+        help="Directory to store the final model and outputs"
     )
-    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible training"
+    )
+    parser.add_argument(
+        "--push_to_hub",
+        action="store_true",
+        help="Whether to push the model to the Hugging Face Hub"
+    )
+    parser.add_argument(
+        "--hub_model_id",
+        type=str,
+        help="The name of the repository to keep in sync with the local output_dir"
+    )
+    parser.add_argument(
+        "--hub_token",
+        type=str,
+        help="The token to use to push to the Model Hub"
+    )
     parser.add_argument(
         "--trust_remote_code",
         type=bool,
         default=False,
-        help=(
-            "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option "
-            "should only be set to `True` for repositories you trust and in which you have read the code, as it will "
-            "execute code present on the Hub on your local machine."
-        ),
+        help="Whether to allow custom models with remote code execution"
     )
+
+    # Checkpointing and resuming
     parser.add_argument(
         "--checkpointing_steps",
         type=str,
         default=None,
-        help="Whether the various states should be saved at the end of every n steps, or 'epoch' for each epoch.",
+        help="Save states every n steps, or 'epoch' for each epoch"
     )
     parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
-        help="If the training should continue from a checkpoint folder.",
+        help="Path to checkpoint folder to resume training from"
     )
+
+    # Experiment tracking
     parser.add_argument(
         "--with_tracking",
         action="store_true",
-        help="Whether to enable experiment trackers for logging.",
+        help="Enable experiment tracking (WandB, TensorBoard, etc.)"
     )
     parser.add_argument(
         "--report_to",
         type=str,
-        default="all",
-        help=(
-            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`,'
-            ' `"wandb"`, `"comet_ml"` and `"clearml"`. Use `"all"` (default) to report to all integrations. '
-            "Only applicable when `--with_tracking` is passed."
-        ),
+        default="wandb",
+        help='Integration to report results to. Options: "tensorboard", "wandb", "comet_ml", "clearml", "all"'
     )
     parser.add_argument(
         "--ignore_mismatched_sizes",
         action="store_true",
-        help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
+        help="Enable loading pretrained model with different head dimensions"
+    )
+    parser.add_argument(
+        "--train_top_k",
+        type=int,
+        default=1000,
+        help="Number of training examples to use from the beginning of the training dataset.",
     )
     args = parser.parse_args()
 
-    # Sanity checks
-
-    if args.push_to_hub:
-        assert args.output_dir is not None, "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
+    # Argument validation
+    if args.push_to_hub and args.output_dir is None:
+        raise ValueError("Need an `output_dir` to create a repo when `--push_to_hub` is passed.")
+    
+    if not os.path.exists(args.training_data_path):
+        raise FileNotFoundError(f"Training data file not found: {args.training_data_path}")
+    
+    if not os.path.exists(args.testing_data_path):
+        raise FileNotFoundError(f"Testing data file not found: {args.testing_data_path}")
+    
+    if args.chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    
+    if args.num_chunks1 <= 0 or args.num_chunks2 <= 0:
+        raise ValueError("Number of chunks must be positive")
 
     return args
 
 
 
 def main():
+    """
+    Main training function that orchestrates the entire training pipeline.
+    
+    This function handles:
+    - Argument parsing and validation
+    - Accelerator setup for distributed training
+    - Data loading and preprocessing
+    - Model initialization and configuration
+    - Training loop with evaluation
+    - Model saving and checkpointing
+    """
     args = parse_args()
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
@@ -328,6 +389,8 @@ def main():
         level=logging.INFO,
     )
     logger.info(accelerator.state, main_process_only=False)
+    
+    # Set logging verbosity based on accelerator state
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
         transformers.utils.logging.set_verbosity_info()
@@ -335,11 +398,12 @@ def main():
         datasets.utils.logging.set_verbosity_error()
         transformers.utils.logging.set_verbosity_error()
 
-    # If passed along, set the training seed now.
+    # Set random seed for reproducibility
     if args.seed is not None:
         set_seed(args.seed)
+        logger.info(f"Set random seed to {args.seed}")
 
-    # Handle the repository creation
+    # Handle repository creation for Hub upload
     if accelerator.is_main_process:
         if args.push_to_hub:
             # Retrieve of infer repo_name
@@ -390,8 +454,8 @@ def main():
 
 
 
-    train_dataset = Dataset.from_list(train[:1000])
-    dev_dataset =  Dataset.from_list(train[1000:])
+    train_dataset = Dataset.from_list(train[:args.train_top_k])
+    dev_dataset =  Dataset.from_list(train[args.train_top_k:])
     test_dataset = Dataset.from_list(test)
     num_labels=2
 

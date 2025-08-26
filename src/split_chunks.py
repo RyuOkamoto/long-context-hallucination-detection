@@ -11,8 +11,27 @@
   # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
   # See the License for the specific language governing permissions and
   # limitations under the License.
+
+"""
+Text Chunking Utilities for Long Context Processing
+
+This module provides utilities for splitting long text inputs into smaller, manageable chunks
+that can be processed by transformer models with limited context windows. It supports various
+chunking strategies including overlapping chunks, sentence-based splitting, and paired 
+context-response chunking.
+
+Key Features:
+- Overlapping chunk generation with configurable stride
+- Sentence-based chunking for response text
+- Context-response pairing for NLI-style processing
+- Proper handling of special tokens (CLS, SEP, PAD)
+- Flexible padding strategies
+
+Author: Siyi Liu et al.
+"""
   
-from typing import Optional
+from typing import Optional, List, Tuple, Union
+import logging
 
 import torch
 from torch import Tensor
