@@ -1,48 +1,33 @@
-  # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-  
-  # Licensed under the Apache License, Version 2.0 (the "License").
-  # You may not use this file except in compliance with the License.
-  # You may obtain a copy of the License at
-  
-  #     http://www.apache.org/licenses/LICENSE-2.0
-  
-  # Unless required by applicable law or agreed to in writing, software
-  # distributed under the License is distributed on an "AS IS" BASIS,
-  # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  # See the License for the specific language governing permissions and
-  # limitations under the License.
-  
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import copy
+from typing import List, Optional, Tuple, Union
+
 import torch
 import torch.utils.checkpoint
-from packaging import version
-from dataclasses import dataclass
-from typing import Optional, Tuple, Union, List
-from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, CosineEmbeddingLoss
-from torch.nn.functional import normalize
-import numpy as np
+from torch import Tensor, nn
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions, SequenceClassifierOutput
+from transformers.models.roberta.modeling_roberta import (
+    RobertaClassificationHead,
+    RobertaEmbeddings,
+    RobertaEncoder,
+    RobertaPooler,
+    RobertaPreTrainedModel,
+)
 
-from transformers.file_utils import (
-    add_code_sample_docstrings,
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-)
-from transformers.modeling_outputs import (
-    ModelOutput,
-    MaskedLMOutput,
-    MultipleChoiceModelOutput,
-    QuestionAnsweringModelOutput,
-    SequenceClassifierOutput,
-    TokenClassifierOutput,
-    BaseModelOutputWithPoolingAndCrossAttentions
-)
-from torch import Tensor
-from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import logging
-from transformers.models.roberta.modeling_roberta import RobertaAttention, RobertaIntermediate, RobertaOutput, RobertaPreTrainedModel, RobertaClassificationHead, RobertaEncoder, RobertaPooler, RobertaEmbeddings
-from transformers.activations import gelu
-from transformers import PretrainedConfig
-import copy
 
 class RobertaModelOurs(RobertaPreTrainedModel):
     """
@@ -86,7 +71,6 @@ class RobertaModelOurs(RobertaPreTrainedModel):
         """
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
-
 
     # Copied from transformers.models.clap.modeling_clap.ClapTextModel.forward
     def forward(
@@ -219,8 +203,10 @@ class RobertaModelOurs(RobertaPreTrainedModel):
             cross_attentions=encoder_outputs.cross_attentions,
         )
 
+
 class RobertaClassificationHeadOurs(nn.Module):
     """Head for sentence-level classification tasks."""
+
     # The only difference of this to source code is that we comment out the first line in forward
     # because in pad_last the number of chunks can be different so we take the CLS first outside
     # of this forward function.
@@ -251,7 +237,6 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
         self.config = config
 
         self.roberta = RobertaModelOurs(config, add_pooling_layer=False)
-        
 
         if self.config.attention_encoder:
             config_oneLayer = copy.deepcopy(config)
@@ -264,7 +249,6 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
         else:
             self.classifier = RobertaClassificationHead(config)
         self.split = config.split
-
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -281,9 +265,9 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        localization_label = None,
-        response_input_ids = None,
-        response_attention_mask = None
+        localization_label=None,
+        response_input_ids=None,
+        response_attention_mask=None,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -294,25 +278,18 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-
-
         batch_size = len(input_ids)
 
-
-
-
-
         if self.split:
-
             all_sequence_output = []
 
             all_self_attentions = []
 
             for i in range(len(input_ids)):
-
                 if self.config.pad_last:
-
-                    chunks_input_ids, chunks_attention_mask, num_contexts_chunks =self.remove_chunks_with_only_pads(input_ids[i], attention_mask[i])
+                    chunks_input_ids, chunks_attention_mask, num_contexts_chunks = self.remove_chunks_with_only_pads(
+                        input_ids[i], attention_mask[i]
+                    )
 
                     outputs = self.roberta(
                         chunks_input_ids,
@@ -328,11 +305,11 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
 
                     sequence_output = outputs[0]
 
-
                     if self.config.split_sent:
                         if not self.config.pair_chunks:
-                            response_chunks_input_ids, response_chunks_attention_mask, num_response_chunks = self.remove_chunks_with_only_pads(response_input_ids[i],
-                                                                                                        response_attention_mask[i])
+                            response_chunks_input_ids, response_chunks_attention_mask, num_response_chunks = (
+                                self.remove_chunks_with_only_pads(response_input_ids[i], response_attention_mask[i])
+                            )
                             outputs_response = self.roberta(
                                 response_chunks_input_ids,
                                 attention_mask=response_chunks_attention_mask,
@@ -362,7 +339,7 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
                 if self.config.attention_encoder:
                     # num_chunks * chunk_size * hidden_size ->  1 * num_chunks * hidden_size
 
-                    chunk_cls_embeds = sequence_output[:, 0, :].unsqueeze(0) #.reshape(1, -1, self.config.hidden_size)
+                    chunk_cls_embeds = sequence_output[:, 0, :].unsqueeze(0)  # .reshape(1, -1, self.config.hidden_size)
                     if self.config.split_sent:
                         if not self.config.pair_chunks:
                             chunk_cls_embeds2 = sequence_output2[:, 0, :].unsqueeze(0)
@@ -374,15 +351,25 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
 
                     SEP_embed = self.roberta_oneLayer.embeddings.word_embeddings(Tensor([2]).long().to(self.device))
 
-
                     if self.config.split_inputs:
                         if self.config.add_sep:
-                            chunk_embeds_with_new_tokens = torch.cat([CLS_embed, chunk_cls_embeds[0][:num_contexts_chunks],SEP_embed, chunk_cls_embeds[0][num_contexts_chunks:], EOS_embed]).unsqueeze(
-                                0)
+                            chunk_embeds_with_new_tokens = torch.cat(
+                                [
+                                    CLS_embed,
+                                    chunk_cls_embeds[0][:num_contexts_chunks],
+                                    SEP_embed,
+                                    chunk_cls_embeds[0][num_contexts_chunks:],
+                                    EOS_embed,
+                                ]
+                            ).unsqueeze(0)
                         else:
-                            chunk_embeds_with_new_tokens = torch.cat([CLS_embed, chunk_cls_embeds[0], EOS_embed]).unsqueeze(0)
+                            chunk_embeds_with_new_tokens = torch.cat(
+                                [CLS_embed, chunk_cls_embeds[0], EOS_embed]
+                            ).unsqueeze(0)
                     else:
-                        chunk_embeds_with_new_tokens = torch.cat([CLS_embed, chunk_cls_embeds[0], EOS_embed]).unsqueeze(0)
+                        chunk_embeds_with_new_tokens = torch.cat([CLS_embed, chunk_cls_embeds[0], EOS_embed]).unsqueeze(
+                            0
+                        )
 
                     outputs2 = self.roberta_oneLayer(
                         None,
@@ -404,12 +391,7 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
                 else:
                     average_chunk_outputs = torch.mean(sequence_output, dim=0).reshape((1, -1, self.config.hidden_size))
 
-
-
-                all_sequence_output.append(average_chunk_outputs[:,0,:])
-
-
-
+                all_sequence_output.append(average_chunk_outputs[:, 0, :])
 
             all_sequence_output = torch.cat(all_sequence_output, dim=0)
 
@@ -428,7 +410,6 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
             )
             sequence_output = outputs[0]
             logits = self.classifier(sequence_output)
-
 
         loss = None
         if labels is not None:
@@ -462,7 +443,6 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
             return ((loss,) + output) if loss is not None else output
 
         if self.config.explainability:
-
             return SequenceClassifierOutput(
                 loss=loss,
                 logits=logits,
@@ -477,8 +457,8 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
                 hidden_states=outputs.hidden_states,
                 # attentions=outputs2.attentions,
             )
-    def pool_chunks(self, input_ids, attention_mask) -> Tensor:
 
+    def pool_chunks(self, input_ids, attention_mask) -> Tensor:
         number_of_chunks = [len(x) for x in input_ids]
 
         # concatenate all input_ids into one batch
@@ -517,13 +497,14 @@ class RobertaForSequenceClassificationOurs(RobertaPreTrainedModel):
         else:
             num_contexts_chunks = self.config.num_chunks_context
 
-
         for index in sorted(all_pads_chunks_ind, reverse=True):
             if index == len(chunks_input_ids):
                 chunks_input_ids = chunks_input_ids[:index]
                 chunks_attention_mask = chunks_attention_mask[:index]
             else:
-                chunks_input_ids = torch.cat([chunks_input_ids[:index], chunks_input_ids[index + 1:]], dim=0)
-                chunks_attention_mask = torch.cat([chunks_attention_mask[:index], chunks_attention_mask[index + 1:]], dim=0)
+                chunks_input_ids = torch.cat([chunks_input_ids[:index], chunks_input_ids[index + 1 :]], dim=0)
+                chunks_attention_mask = torch.cat(
+                    [chunks_attention_mask[:index], chunks_attention_mask[index + 1 :]], dim=0
+                )
 
         return chunks_input_ids, chunks_attention_mask, num_contexts_chunks

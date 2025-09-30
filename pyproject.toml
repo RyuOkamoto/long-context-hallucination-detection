@@ -1,0 +1,30 @@
+[project]
+name = "long-context-hallucination-detection"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.10.1",
+    "datasets>=4.1.1",
+    "evaluate>=0.4.6",
+    "huggingface-hub>=0.35.3",
+    "torch>=2.8.0",
+    "tqdm>=4.67.1",
+    "transformers>=4.56.2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.13.2",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = [ "I" ]
+
+[tool.ruff.format]
+quote-style = "double"
+

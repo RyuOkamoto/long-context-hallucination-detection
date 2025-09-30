@@ -15,43 +15,38 @@
 
 
 import argparse
+import csv
 import json
 import logging
 import math
 import os
-import random
-from pathlib import Path
 from datetime import timedelta
-import csv
+from pathlib import Path
 
 import datasets
 import evaluate
 import torch
+import transformers
 from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from datasets import load_dataset, Dataset
+from datasets import Dataset
 from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-
-import transformers
 from transformers import (
     AutoConfig,
-    AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
-    PretrainedConfig,
     SchedulerType,
     default_data_collator,
     get_scheduler,
 )
-from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils import send_example_telemetry
 from transformers.utils.versions import require_version
-from model import RobertaForSequenceClassificationOurs
-from split_chunks import transform_list_of_text_pairs, transform_list_of_text
-import pickle
 
+from model import RobertaForSequenceClassificationOurs
+from split_chunks import transform_list_of_text, transform_list_of_text_pairs
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.43.0.dev0")
@@ -61,274 +56,149 @@ logger = get_logger(__name__)
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
 
 
-
 def parse_args():
     """
     Parse command line arguments for training configuration.
-    
+
     Returns:
         argparse.Namespace: Parsed arguments containing all training parameters
     """
-    parser = argparse.ArgumentParser(
-        description="Train a long context hallucination detection model using RoBERTa"
-    )
+    parser = argparse.ArgumentParser(description="Train a long context hallucination detection model using RoBERTa")
 
     # Model architecture arguments
     parser.add_argument(
-        "--explainability",
-        action="store_true",
-        help="Enable explainability features for attention visualization"
+        "--explainability", action="store_true", help="Enable explainability features for attention visualization"
     )
     parser.add_argument(
-        "--split_sent",
-        action="store_true",
-        help="Split response into sentences instead of fixed length chunks"
+        "--split_sent", action="store_true", help="Split response into sentences instead of fixed length chunks"
+    )
+    parser.add_argument("--add_sep", action="store_true", help="Add SEP token between context and response chunks")
+    parser.add_argument("--sent_length", type=int, default=20, help="Maximum length for sentence-based chunks")
+    parser.add_argument("--pad_original", action="store_true", help="Use original style of padding (legacy option)")
+    parser.add_argument(
+        "--pair_chunks", action="store_true", help="Use NLI-style pairing of context and response chunks"
     )
     parser.add_argument(
-        "--add_sep",
-        action="store_true",
-        help="Add SEP token between context and response chunks"
+        "--pad_last", action="store_true", help="Pad everything at the end instead of padding each chunk individually"
     )
     parser.add_argument(
-        "--sent_length",
-        type=int,
-        default=20,
-        help="Maximum length for sentence-based chunks"
-    )
-    parser.add_argument(
-        "--pad_original",
-        action="store_true",
-        help="Use original style of padding (legacy option)"
-    )
-    parser.add_argument(
-        "--pair_chunks",
-        action="store_true",
-        help="Use NLI-style pairing of context and response chunks"
-    )
-    parser.add_argument(
-        "--pad_last",
-        action="store_true",
-        help="Pad everything at the end instead of padding each chunk individually"
-    )
-    parser.add_argument(
-        "--split_inputs",
-        action="store_true",
-        help="Split input into separate context chunks and response chunks"
+        "--split_inputs", action="store_true", help="Split input into separate context chunks and response chunks"
     )
 
     # Chunking parameters
+    parser.add_argument("--num_chunks1", type=int, default=32, help="Number of context chunks")
+    parser.add_argument("--num_chunks2", type=int, default=8, help="Number of response chunks")
+    parser.add_argument("--chunk_size", type=int, default=256, help="Size of each chunk in tokens")
+    parser.add_argument("--stride", type=int, default=256, help="Stride for overlapping chunks")
+    parser.add_argument("--minimal_chunk_length", type=int, default=0, help="Minimum length for a chunk to be included")
     parser.add_argument(
-        "--num_chunks1",
-        type=int,
-        default=32,
-        help="Number of context chunks"
-    )
-    parser.add_argument(
-        "--num_chunks2",
-        type=int,
-        default=8,
-        help="Number of response chunks"
-    )
-    parser.add_argument(
-        "--chunk_size",
-        type=int,
-        default=256,
-        help="Size of each chunk in tokens"
-    )
-    parser.add_argument(
-        "--stride",
-        type=int,
-        default=256,
-        help="Stride for overlapping chunks"
-    )
-    parser.add_argument(
-        "--minimal_chunk_length",
-        type=int,
-        default=0,
-        help="Minimum length for a chunk to be included"
-    )
-    parser.add_argument(
-        "--maximal_text_length",
-        type=int,
-        default=8192,
-        help="Maximum total text length before truncation"
+        "--maximal_text_length", type=int, default=8192, help="Maximum total text length before truncation"
     )
 
     # Model configuration
+    parser.add_argument("--split", action="store_true", help="Enable chunk splitting for long contexts")
     parser.add_argument(
-        "--split",
-        action="store_true",
-        help="Enable chunk splitting for long contexts"
-    )
-    parser.add_argument(
-        "--attention_encoder",
-        action="store_true",
-        help="Use attention-based aggregation instead of mean pooling"
+        "--attention_encoder", action="store_true", help="Use attention-based aggregation instead of mean pooling"
     )
 
     # Input/Output arguments
-    parser.add_argument(
-        "--max_length",
-        type=int,
-        default=128,
-        help="Maximum input sequence length after tokenization"
-    )
+    parser.add_argument("--max_length", type=int, default=128, help="Maximum input sequence length after tokenization")
     parser.add_argument(
         "--pad_to_max_length",
         action="store_true",
-        help="Pad all samples to max_length instead of using dynamic padding"
+        help="Pad all samples to max_length instead of using dynamic padding",
     )
     parser.add_argument(
         "--model_name_or_path",
         type=str,
         required=True,
-        help="Path to pretrained model or model identifier from huggingface.co/models"
+        help="Path to pretrained model or model identifier from huggingface.co/models",
     )
     parser.add_argument(
-        "--training_data_path",
-        type=str,
-        required=True,
-        help="Path to training data file (JSON format)"
+        "--training_data_path", type=str, required=True, help="Path to training data file (JSON format)"
     )
     parser.add_argument(
-        "--testing_data_path",
-        type=str,
-        required=True,
-        help="Path to testing/validation data file (JSON format)"
+        "--testing_data_path", type=str, required=True, help="Path to testing/validation data file (JSON format)"
     )
     parser.add_argument(
-        "--backbone_model",
-        type=str,
-        help="Path to backbone model if different from model_name_or_path"
+        "--backbone_model", type=str, help="Path to backbone model if different from model_name_or_path"
     )
 
     # Training arguments
     parser.add_argument(
         "--use_slow_tokenizer",
         action="store_true",
-        help="Use a slow tokenizer (not backed by the 🤗 Tokenizers library)"
+        help="Use a slow tokenizer (not backed by the 🤗 Tokenizers library)",
     )
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1, help="Batch size per device for training")
     parser.add_argument(
-        "--per_device_train_batch_size",
-        type=int,
-        default=1,
-        help="Batch size per device for training"
+        "--per_device_eval_batch_size", type=int, default=1, help="Batch size per device for evaluation"
     )
-    parser.add_argument(
-        "--per_device_eval_batch_size",
-        type=int,
-        default=1,
-        help="Batch size per device for evaluation"
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=2e-6,
-        help="Initial learning rate"
-    )
-    parser.add_argument(
-        "--weight_decay",
-        type=float,
-        default=0.1,
-        help="Weight decay to use"
-    )
-    parser.add_argument(
-        "--num_train_epochs",
-        type=int,
-        default=200,
-        help="Total number of training epochs"
-    )
+    parser.add_argument("--learning_rate", type=float, default=2e-6, help="Initial learning rate")
+    parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay to use")
+    parser.add_argument("--num_train_epochs", type=int, default=200, help="Total number of training epochs")
     parser.add_argument(
         "--max_train_steps",
         type=int,
         default=None,
-        help="Total number of training steps (overrides num_train_epochs if provided)"
+        help="Total number of training steps (overrides num_train_epochs if provided)",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
         default=1,
-        help="Number of update steps to accumulate before performing backward/update pass"
+        help="Number of update steps to accumulate before performing backward/update pass",
     )
     parser.add_argument(
         "--lr_scheduler_type",
         type=SchedulerType,
         default="linear",
         help="The scheduler type to use",
-        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]
+        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
     )
     parser.add_argument(
-        "--num_warmup_steps",
-        type=int,
-        default=1000,
-        help="Number of steps for warmup in the lr scheduler"
+        "--num_warmup_steps", type=int, default=1000, help="Number of steps for warmup in the lr scheduler"
     )
 
     # Output and logging arguments
     parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="./outputs",
-        help="Directory to store the final model and outputs"
+        "--output_dir", type=str, default="./outputs", help="Directory to store the final model and outputs"
     )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible training")
+    parser.add_argument("--push_to_hub", action="store_true", help="Whether to push the model to the Hugging Face Hub")
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducible training"
+        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local output_dir"
     )
-    parser.add_argument(
-        "--push_to_hub",
-        action="store_true",
-        help="Whether to push the model to the Hugging Face Hub"
-    )
-    parser.add_argument(
-        "--hub_model_id",
-        type=str,
-        help="The name of the repository to keep in sync with the local output_dir"
-    )
-    parser.add_argument(
-        "--hub_token",
-        type=str,
-        help="The token to use to push to the Model Hub"
-    )
+    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub")
     parser.add_argument(
         "--trust_remote_code",
         type=bool,
         default=False,
-        help="Whether to allow custom models with remote code execution"
+        help="Whether to allow custom models with remote code execution",
     )
 
     # Checkpointing and resuming
     parser.add_argument(
-        "--checkpointing_steps",
-        type=str,
-        default=None,
-        help="Save states every n steps, or 'epoch' for each epoch"
+        "--checkpointing_steps", type=str, default=None, help="Save states every n steps, or 'epoch' for each epoch"
     )
     parser.add_argument(
-        "--resume_from_checkpoint",
-        type=str,
-        default=None,
-        help="Path to checkpoint folder to resume training from"
+        "--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint folder to resume training from"
     )
 
     # Experiment tracking
     parser.add_argument(
-        "--with_tracking",
-        action="store_true",
-        help="Enable experiment tracking (WandB, TensorBoard, etc.)"
+        "--with_tracking", action="store_true", help="Enable experiment tracking (WandB, TensorBoard, etc.)"
     )
     parser.add_argument(
         "--report_to",
         type=str,
         default="wandb",
-        help='Integration to report results to. Options: "tensorboard", "wandb", "comet_ml", "clearml", "all"'
+        help='Integration to report results to. Options: "tensorboard", "wandb", "comet_ml", "clearml", "all"',
     )
     parser.add_argument(
         "--ignore_mismatched_sizes",
         action="store_true",
-        help="Enable loading pretrained model with different head dimensions"
+        help="Enable loading pretrained model with different head dimensions",
     )
     parser.add_argument(
         "--train_top_k",
@@ -341,27 +211,26 @@ def parse_args():
     # Argument validation
     if args.push_to_hub and args.output_dir is None:
         raise ValueError("Need an `output_dir` to create a repo when `--push_to_hub` is passed.")
-    
+
     if not os.path.exists(args.training_data_path):
         raise FileNotFoundError(f"Training data file not found: {args.training_data_path}")
-    
+
     if not os.path.exists(args.testing_data_path):
         raise FileNotFoundError(f"Testing data file not found: {args.testing_data_path}")
-    
+
     if args.chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
-    
+
     if args.num_chunks1 <= 0 or args.num_chunks2 <= 0:
         raise ValueError("Number of chunks must be positive")
 
     return args
 
 
-
 def main():
     """
     Main training function that orchestrates the entire training pipeline.
-    
+
     This function handles:
     - Argument parsing and validation
     - Accelerator setup for distributed training
@@ -380,7 +249,9 @@ def main():
     # in the environment
     timeout = [InitProcessGroupKwargs(timeout=timedelta(seconds=1800))]
     accelerator = (
-        Accelerator(log_with=args.report_to, project_dir=args.output_dir, kwargs_handlers=timeout) if args.with_tracking else Accelerator(kwargs_handlers=timeout)
+        Accelerator(log_with=args.report_to, project_dir=args.output_dir, kwargs_handlers=timeout)
+        if args.with_tracking
+        else Accelerator(kwargs_handlers=timeout)
     )
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -389,7 +260,7 @@ def main():
         level=logging.INFO,
     )
     logger.info(accelerator.state, main_process_only=False)
-    
+
     # Set logging verbosity based on accelerator state
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
@@ -435,7 +306,7 @@ def main():
 
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-        # Loading the dataset from local csv or json file.
+    # Loading the dataset from local csv or json file.
     # data_files = {}
     # if args.train_file is not None:
     #     data_files["train"] = args.train_file
@@ -452,12 +323,10 @@ def main():
     with open(args.training_data_path, "r") as file:
         train = json.load(file)
 
-
-
-    train_dataset = Dataset.from_list(train[:args.train_top_k])
-    dev_dataset =  Dataset.from_list(train[args.train_top_k:])
+    train_dataset = Dataset.from_list(train[: args.train_top_k])
+    dev_dataset = Dataset.from_list(train[args.train_top_k :])
     test_dataset = Dataset.from_list(test)
-    num_labels=2
+    num_labels = 2
 
     # Load pretrained model and tokenizer
     #
@@ -486,7 +355,6 @@ def main():
     config.pair_chunks = args.pair_chunks
 
     if args.backbone_model:
-
         model = RobertaForSequenceClassificationOurs.from_pretrained(
             args.backbone_model,
             from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -504,7 +372,6 @@ def main():
             trust_remote_code=args.trust_remote_code,
         )
 
-
     padding = "max_length" if args.pad_to_max_length else False
 
     def preprocess_function(examples):
@@ -513,13 +380,35 @@ def main():
             if args.split:
                 if args.split_inputs:
                     # print("Splitting inputs contexts response!")
-                    batch = transform_list_of_text_pairs(examples["context"],examples["response"], tokenizer, args.chunk_size, args.stride,
-                                                    args.minimal_chunk_length, args.num_chunks1, args.num_chunks2, args.pad_last, args.pad_original, args.maximal_text_length,args.split_sent, args.sent_length, args.pair_chunks)
+                    batch = transform_list_of_text_pairs(
+                        examples["context"],
+                        examples["response"],
+                        tokenizer,
+                        args.chunk_size,
+                        args.stride,
+                        args.minimal_chunk_length,
+                        args.num_chunks1,
+                        args.num_chunks2,
+                        args.pad_last,
+                        args.pad_original,
+                        args.maximal_text_length,
+                        args.split_sent,
+                        args.sent_length,
+                        args.pair_chunks,
+                    )
 
                 else:
-                    batch = transform_list_of_text(examples["text"], tokenizer, args.chunk_size, args.stride,
-                                                    args.minimal_chunk_length, args.num_chunks1, args.pad_last, args.pad_original, args.maximal_text_length)
-
+                    batch = transform_list_of_text(
+                        examples["text"],
+                        tokenizer,
+                        args.chunk_size,
+                        args.stride,
+                        args.minimal_chunk_length,
+                        args.num_chunks1,
+                        args.pad_last,
+                        args.pad_original,
+                        args.maximal_text_length,
+                    )
 
             else:
                 batch = tokenizer(
@@ -529,7 +418,7 @@ def main():
                     truncation=True,
                 )
 
-            batch['labels'] = examples['labels']
+            batch["labels"] = examples["labels"]
 
             return batch
 
@@ -551,7 +440,6 @@ def main():
             desc="Running tokenizer on test dataset",
         )
 
-
     # Log a few random samples from the training set:
     # for index in random.sample(range(len(train_dataset)), 3):
     #     logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
@@ -571,7 +459,6 @@ def main():
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
-
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -625,7 +512,9 @@ def main():
         experiment_config = vars(args)
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-        accelerator.init_trackers("aws_intern", experiment_config, init_kwargs={"wandb":{"name":args.output_dir.split("/")[1]}})
+        accelerator.init_trackers(
+            "aws_intern", experiment_config, init_kwargs={"wandb": {"name": args.output_dir.split("/")[1]}}
+        )
 
     # Get the metric function
 
@@ -681,7 +570,7 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
-    max_f1 =-1
+    max_f1 = -1
 
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
@@ -722,17 +611,27 @@ def main():
         preds = []
         refs = []
         txt = []
-        txt2=[]
-        all_scores=[]
+        txt2 = []
+        all_scores = []
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
                 outputs = model(**batch)
             predictions = outputs.logits.argmax(dim=-1)
             if args.explainability:
                 attentions = outputs.attentions
-                predictions, references, attentions, localization_labels, scores = accelerator.gather((predictions, batch["labels"], attentions, batch["localization_label"], torch.softmax(outputs.logits)))
+                predictions, references, attentions, localization_labels, scores = accelerator.gather(
+                    (
+                        predictions,
+                        batch["labels"],
+                        attentions,
+                        batch["localization_label"],
+                        torch.softmax(outputs.logits),
+                    )
+                )
             else:
-                predictions, references, logits, input_ids, response_input_ids = accelerator.gather((predictions, batch["labels"], outputs.logits, batch["input_ids"], batch["response_input_ids"]))
+                predictions, references, logits, input_ids, response_input_ids = accelerator.gather(
+                    (predictions, batch["labels"], outputs.logits, batch["input_ids"], batch["response_input_ids"])
+                )
                 scores = logits.softmax(dim=1)
                 scores = [scores[ind][1] for ind in range(len(scores))]
 
@@ -743,7 +642,6 @@ def main():
                     else:
                         new_preds.append(0)
                 predictions = new_preds
-
 
             # If we are in a multiprocess environment, the last batch has duplicates
             if accelerator.num_processes > 1:
@@ -775,7 +673,6 @@ def main():
                 references=references,
             )
 
-
             for ind in range(len(predictions)):
                 preds.append(int(predictions[ind]))
                 refs.append(int(references[ind].detach().cpu().numpy()))
@@ -783,13 +680,10 @@ def main():
                 txt2.append(tokenizer.decode(list(response_input_ids[ind].reshape(-1).detach().cpu().numpy())))
                 all_scores.append(scores[ind])
 
-
-
             if args.explainability:
                 attentions_new = []
                 localization_labels_new = []
                 for i in range(len(attentions)):
-
                     if not torch.equal(localization_labels[i].detach().cpu(), torch.Tensor([-1])[0]):
                         attentions_new.append(attentions[i].detach().cpu())
                         localization_labels_new.append(localization_labels[i].detach().cpu())
@@ -798,9 +692,6 @@ def main():
                     predictions=attentions_new,
                     references=localization_labels_new,
                 )
-
-
-
 
         eval_metric1 = metric1.compute()
         eval_metric2 = metric2.compute()
@@ -817,7 +708,6 @@ def main():
         if args.with_tracking:
             logger.info(f"Train loss {total_loss.item() / len(train_dataloader)}")
 
-
         if args.with_tracking:
             accelerator.log(
                 {
@@ -832,10 +722,10 @@ def main():
                 step=completed_steps,
             )
         if accelerator.is_main_process:
-            if eval_metric5["roc_auc"]>max_f1:
+            if eval_metric5["roc_auc"] > max_f1:
                 max_f1 = eval_metric5["roc_auc"]
                 print("Writing!!!!!")
-                with open('pred_ref_new.csv', 'w') as csvfile:
+                with open("pred_ref_new.csv", "w") as csvfile:
                     writer = csv.writer(csvfile)
                     writer.writerow(["preds", "refs", "scores", "inputs", "inputs2"])
                     for ind in range(len(preds)):
@@ -867,10 +757,12 @@ def main():
         if args.output_dir is not None:
             # all_results = {f"eval_{k}": v for k, v in eval_metric1.items()}
             with open(os.path.join(args.output_dir, "results_log.txt"), "a") as f:
-                f.write(f"Epoch_{epoch}: Train Loss: {total_loss.item() / len(train_dataloader)} \n "
-                        f"Eval F1: {eval_metric1} \n"
-                        f"Eval Precision: {eval_metric2} \n"
-                        f"Eval Recall: {eval_metric3} \n")
+                f.write(
+                    f"Epoch_{epoch}: Train Loss: {total_loss.item() / len(train_dataloader)} \n "
+                    f"Eval F1: {eval_metric1} \n"
+                    f"Eval Precision: {eval_metric2} \n"
+                    f"Eval Recall: {eval_metric3} \n"
+                )
 
     if args.with_tracking:
         accelerator.end_training()
@@ -891,10 +783,6 @@ def main():
                     repo_type="model",
                     token=args.hub_token,
                 )
-
-
-
-
 
 
 if __name__ == "__main__":

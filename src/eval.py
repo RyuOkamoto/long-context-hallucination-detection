@@ -1,16 +1,16 @@
-  # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-  
-  # Licensed under the Apache License, Version 2.0 (the "License").
-  # You may not use this file except in compliance with the License.
-  # You may obtain a copy of the License at
-  
-  #     http://www.apache.org/licenses/LICENSE-2.0
-  
-  # Unless required by applicable law or agreed to in writing, software
-  # distributed under the License is distributed on an "AS IS" BASIS,
-  # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  # See the License for the specific language governing permissions and
-  # limitations under the License.
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Evaluation Script for Long Context Hallucination Detection
@@ -35,42 +35,22 @@ Author: Siyi Liu et al.
 
 import argparse
 import json
-import logging
-import math
-import os
-import random
-from pathlib import Path
 
-import datasets
 import evaluate
 import torch
-from accelerate import Accelerator, InitProcessGroupKwargs
-from accelerate.logging import get_logger
-from accelerate.utils import set_seed
-from datasets import load_dataset
-from huggingface_hub import HfApi
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+from accelerate import accelerator
 from datasets import Dataset
-from datetime import timedelta
-import csv
-
-import transformers
+from torch.utils.data import DataLoader
 from transformers import (
     AutoConfig,
-    AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
-    PretrainedConfig,
     SchedulerType,
     default_data_collator,
-    get_scheduler,
 )
-from transformers.utils import check_min_version, send_example_telemetry
-from transformers.utils.versions import require_version
+
 from model import RobertaForSequenceClassificationOurs
-from split_chunks import transform_list_of_text_pairs, transform_list_of_text
-import pickle
+from split_chunks import transform_list_of_text, transform_list_of_text_pairs
 
 
 def parse_args():
@@ -100,7 +80,6 @@ def parse_args():
         default=20,
     )
 
-
     parser.add_argument(
         "--pad_original",
         action="store_true",
@@ -112,7 +91,6 @@ def parse_args():
         action="store_true",
         help="If passed, using a NLI style of pairing chunks.",
     )
-
 
     parser.add_argument(
         "--pad_last",
@@ -322,19 +300,42 @@ def parse_args():
 
     return args
 
-def preprocess_function(examples):
+
+def preprocess_function(examples, args, tokenizer, padding):
     # Tokenize the texts
     if "roberta" in args.model_name_or_path:
         if args.split:
             if args.split_inputs:
                 # print("Splitting inputs contexts response!")
-                batch = transform_list_of_text_pairs(examples["context"],examples["response"], tokenizer, args.chunk_size, args.stride,
-                                                args.minimal_chunk_length, args.num_chunks1, args.num_chunks2, args.pad_last, args.pad_original, args.maximal_text_length,args.split_sent, args.sent_length, args.pair_chunks)
+                batch = transform_list_of_text_pairs(
+                    examples["context"],
+                    examples["response"],
+                    tokenizer,
+                    args.chunk_size,
+                    args.stride,
+                    args.minimal_chunk_length,
+                    args.num_chunks1,
+                    args.num_chunks2,
+                    args.pad_last,
+                    args.pad_original,
+                    args.maximal_text_length,
+                    args.split_sent,
+                    args.sent_length,
+                    args.pair_chunks,
+                )
 
             else:
-                batch = transform_list_of_text(examples["text"], tokenizer, args.chunk_size, args.stride,
-                                                args.minimal_chunk_length, args.num_chunks1, args.pad_last, args.pad_original, args.maximal_text_length)
-
+                batch = transform_list_of_text(
+                    examples["text"],
+                    tokenizer,
+                    args.chunk_size,
+                    args.stride,
+                    args.minimal_chunk_length,
+                    args.num_chunks1,
+                    args.pad_last,
+                    args.pad_original,
+                    args.maximal_text_length,
+                )
 
         else:
             batch = tokenizer(
@@ -344,9 +345,10 @@ def preprocess_function(examples):
                 truncation=True,
             )
 
-        batch['labels'] = examples['labels']
+        batch["labels"] = examples["labels"]
 
         return batch
+
 
 def main():
     args = parse_args()
@@ -367,7 +369,6 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-
     config.pad_token_id = tokenizer.pad_token_id
     config.problem_type = "single_label_classification"
     config.split = args.split
@@ -381,7 +382,6 @@ def main():
     config.pair_chunks = args.pair_chunks
 
     if args.backbone_model:
-
         model = RobertaForSequenceClassificationOurs.from_pretrained(
             args.backbone_model,
             from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -403,9 +403,8 @@ def main():
 
     padding = "max_length" if args.pad_to_max_length else False
 
-
     eval_dataset = test_dataset.map(
-        preprocess_function,
+        lambda examples: preprocess_function(examples, args, tokenizer, padding),
         batched=True,
         remove_columns=test_dataset.column_names,
         desc="Running tokenizer on test dataset",
@@ -438,7 +437,13 @@ def main():
         with torch.no_grad():
             outputs = model(**batch)
         predictions = outputs.logits.argmax(dim=-1)
-        predictions, references, logits, input_ids, response_input_ids = predictions, batch["labels"], outputs.logits, batch["input_ids"], batch["response_input_ids"]
+        predictions, references, logits, input_ids, response_input_ids = (
+            predictions,
+            batch["labels"],
+            outputs.logits,
+            batch["input_ids"],
+            batch["response_input_ids"],
+        )
 
         scores = logits.softmax(dim=1)
         scores = [scores[ind][1] for ind in range(len(scores))]
